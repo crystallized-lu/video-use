@@ -92,13 +92,13 @@ The simplest path: drop in a video, mark what to keep in a text file, get the re
 
     ```
     # <video name> — delete the lines you don't want, keep the rest. Then tell me "done".
-    [001] [002.52–005.36] Ninety percent of what a web agent does is completely wasted.
-    [002] [006.08–006.74] We fixed this.
+    [001] [002.52-005.36] Ninety percent of what a web agent does is completely wasted.
+    [002] [006.08-006.74] We fixed this.
     ```
 
     Tell the user: open it in any editor, delete whole lines to cut them, save, say "done". Reordering lines reorders segments.
 4. **On "done", rebuild the keep-list by matching phrase text**, not the edited timestamps — users mangle brackets. Match each surviving line's text against the transcript JSON phrases; the JSON's word timings are the source of truth for the EDL.
-5. **Build the EDL** from surviving phrases (pad per the snap-to-silence hard rule), render, and burn captions in their style:
+5. **Build the EDL** from surviving phrases — snap to word boundaries (Hard Rule 6) and pad every cut edge 30-200ms (Hard Rule 7) — render, and burn captions in their style:
 
     ```bash
     python helpers/make_ass_captions.py --edl edit/edl.json -o edit/master.ass --style style.json
