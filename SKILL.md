@@ -80,6 +80,29 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
 
+## Guided workflow (default for first-time users)
+
+The simplest path: drop in a video, mark what to keep in a text file, get the render. Use this when the user asks for it, is new, or says "just give me the transcript to mark up." For nuanced editing (retake selection, filler-word surgery, grading, animations) use "The process" below instead.
+
+1. **Read `style.json`** from the videos directory (created at install). It carries the caption style and `whisper_model`. If missing, fall back to defaults and offer to run the style wizard from `install.md`.
+2. **Transcribe locally:** `python helpers/transcribe_local.py <video> --model <whisper_model from style.json>`.
+3. **Write `edit/transcript.md`** — every phrase from the packed transcript as one numbered line:
+
+    ```
+    # <video name> — delete the lines you don't want, keep the rest. Then tell me "done".
+    [001] [002.52–005.36] Ninety percent of what a web agent does is completely wasted.
+    [002] [006.08–006.74] We fixed this.
+    ```
+
+    Tell the user: open it in any editor, delete whole lines to cut them, save, say "done". Reordering lines reorders segments.
+4. **On "done", rebuild the keep-list by matching phrase text**, not the edited timestamps — users mangle brackets. Match each surviving line's text against the transcript JSON phrases; the JSON's word timings are the source of truth for the EDL.
+5. **Build the EDL** from surviving phrases (pad per the snap-to-silence hard rule), render, and burn captions in their style:
+
+    ```bash
+    python helpers/make_ass_captions.py --edl edit/edl.json -o edit/master.ass --style style.json
+    ```
+6. **Self-eval and deliver** `edit/final.mp4` per the hard rules — the guided path still obeys every production-correctness rule.
+
 ## The process
 
 1. **Inventory.** `ffprobe` every source. `transcribe_batch.py` on the directory. `pack_transcripts.py` to produce `takes_packed.md`. Sample one or two `timeline_view`s for a visual first impression.
@@ -176,6 +199,8 @@ For anything else — portraiture, nature, product, music video, documentary —
 Hard rules: apply **per-segment during extraction** (not post-concat, which re-encodes twice). Never go aggressive without testing skin tones.
 
 ## Subtitles (when requested)
+
+If the videos directory has a `style.json`, pass it: `python helpers/make_ass_captions.py --edl <edl> -o <out.ass> --style style.json`. It overrides fonts, colours, caption grouping, and the emphasis word lists. Only fall back to the built-in house style when no `style.json` exists.
 
 Subtitles have three dimensions worth reasoning about: **chunking** (1/2/3/sentence per line), **case** (UPPER/Title/Natural), and **placement** (margin from bottom). The right combo depends on content.
 
