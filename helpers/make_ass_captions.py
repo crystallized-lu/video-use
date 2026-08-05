@@ -1,6 +1,6 @@
 """Generate a master.ass subtitle file with per-word color highlighting.
 
-Matches the reel house style:
+Applies a configurable house style:
 - Lato Black (weight 900) for base words
 - Libre Baskerville Italic for emphasis words
 - 78px, bottom-center alignment, double-shadow for legibility
@@ -44,32 +44,11 @@ SWITCH_CAPTIONS_EVERY_MS = 1100
 UPPERCASE = False
 MAX_WORDS_PER_PAGE = None
 
-WORD_CORRECTIONS = {
-    "wicks": "Wix",
-    "1st": "first",
-    "scaleway": "Scaleway",
-    "webcode": "vibe code",
-}
+WORD_CORRECTIONS: dict[str, str] = {}
 
-MERGE_PHRASES: list[list[str]] = [
-    ["vibe", "coding"],
-    ["vibe", "code"],
-    ["coding", "agent"],
-    ["static", "website"],
-    ["classical", "artwork"],
-    ["custom", "website"],
-]
+MERGE_PHRASES: list[list[str]] = []
 
-EMPHASIS_WORDS = {
-    "geocities", "neopets", "myspace", "html", "css",
-    "vibe", "coding", "code",
-    "wix", "squarespace", "wordpress",
-    "agent", "scaleway", "claude",
-    "vision", "brand",
-    "classical", "artwork", "modern",
-    "marry", "old", "new",
-    "creativity", "human", "custom", "first",
-}
+EMPHASIS_WORDS: set[str] = set()
 
 
 def clean_word(s: str) -> str:
