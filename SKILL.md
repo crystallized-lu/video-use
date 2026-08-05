@@ -41,9 +41,11 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
 ```
 <videos_dir>/
 ├── <source files, untouched>
+├── style.json                   ← caption style + whisper_model, created at install
 └── edit/
     ├── project.md               ← memory; appended every session
     ├── takes_packed.md          ← phrase-level transcripts, the LLM's primary reading view
+    ├── transcript.md            ← guided-workflow markup file — delete lines to cut
     ├── edl.json                 ← cut decisions
     ├── transcripts/<name>.json  ← cached raw transcript JSON (local or Scribe)
     ├── animations/slot_<id>/    ← per-animation source + render + reasoning
@@ -57,7 +59,7 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
 
 ## Setup
 
-First-time install lives in `install.md` (clone, deps, ffmpeg, skill registration, API key). Don't re-run it every session; on cold start just verify:
+First-time install lives in `install.md` (clone, deps, ffmpeg, skill registration, local Whisper model). Don't re-run it every session; on cold start just verify:
 
 - `faster-whisper` is importable — `uv run python -c "import faster_whisper"` in the repo. This is the default local transcription path; no API key needed. `ELEVENLABS_API_KEY` is only required if the user wants hosted Scribe (diarization, audio events) via `transcribe.py` — if missing and Scribe is requested, ask the user to paste one and write it to `.env` at the video-use repo root (never to the user's `<videos_dir>`).
 - `ffmpeg` + `ffprobe` on PATH.
