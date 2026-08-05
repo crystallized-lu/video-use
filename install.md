@@ -1,6 +1,6 @@
 ---
 name: video-use-install
-description: Install video-use into the current agent (Claude Code, Codex, Hermes, Openclaw, etc.) and wire up ffmpeg + the ElevenLabs API key so the user can start editing immediately.
+description: Install video-use into the current agent (Claude Code, Codex, etc.), verify dependencies, pre-download the local Whisper model, and set up the user's caption style. No API key required.
 ---
 
 # video-use install
@@ -15,7 +15,7 @@ Three things must exist on this machine:
 
 1. The `video-use` repo cloned somewhere stable.
 2. `ffmpeg` on `$PATH` (plus optional `yt-dlp` for online sources).
-3. An ElevenLabs API key in `.env` at the repo root (for Scribe transcription).
+3. The local Whisper model downloaded (faster-whisper — installed by uv sync).
 
 And one thing must be true about the current agent:
 
@@ -23,7 +23,7 @@ And one thing must be true about the current agent:
 
 ## Install prompt contract
 
-- Do everything yourself. Only ask the user for things you cannot generate — the ElevenLabs API key, and confirmation before `brew install`.
+- Do everything yourself. Only ask the user for things you cannot generate — the Whisper model size choice, caption style preferences, an optional ElevenLabs API key if they want diarization, and confirmation before `brew install`.
 - Prefer a stable clone path like `~/Developer/video-use` (not `/tmp`, not `~/Downloads`).
 - The skill references helpers by bare name (`transcribe.py`, `render.py`). That works because SKILL.md and `helpers/` ship together — keep them as siblings when you register the skill.
 - After install, verify by running one real command against one real file. Don't declare success on file-existence checks alone.
@@ -43,10 +43,12 @@ If the repo is already there, `git pull --ff-only` and continue.
 
 ```bash
 # Prefer uv if available; fall back to pip.
-command -v uv >/dev/null && uv sync || pip install -e .
+command -v uv >/dev/null && uv sync -p 3.12 || pip install -e .
 ```
 
-`pyproject.toml` lists `requests`, `librosa`, `matplotlib`, `pillow`, `numpy`. No console scripts — helpers are invoked directly as `python helpers/<name>.py`.
+If uv picks an unsupported Python (3.15+), pass an explicit interpreter: `uv sync -p 3.12`.
+
+`pyproject.toml` lists `requests`, `librosa`, `matplotlib`, `pillow`, `numpy`, `faster-whisper`. No console scripts — helpers are invoked directly as `python helpers/<name>.py`.
 
 ### 3. Install ffmpeg (+ optional yt-dlp)
 
@@ -89,43 +91,61 @@ Figure out which agent you are running under, and register once. A symlink of th
 
 If you can't tell which agent you're in, ask the user once: "which agent am I running under — Claude Code, Codex, or something else?" Then pick the right target.
 
-### 5. ElevenLabs API key
+### 5. Local Whisper model — choose and pre-download
 
-Scribe (ElevenLabs) does all transcription. Without a key, nothing transcribes.
+Transcription runs locally via faster-whisper (`helpers/transcribe_local.py`). No API key, nothing leaves the machine.
 
-1. Check existing state in this order and stop at the first hit:
+Pick a model size with the user (one question):
+
+- **large-v3** (~3 GB) — best accuracy. Recommended on Apple Silicon or any recent multi-core CPU.
+- **medium / small** — noticeably faster on older or low-RAM machines; accuracy still fine for clean speech.
+
+Pre-download it now so the user's first real transcription isn't a multi-gigabyte surprise:
+
+```bash
+uv run python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3', device='cpu', compute_type='int8')"
+```
+
+(Substitute the chosen size.) Record the choice as `whisper_model` in `style.json` (step 6).
+
+**Optional — ElevenLabs Scribe.** For speaker diarization and audio-event tags (`(laughs)`, `(applause)`), the cloud path in `helpers/transcribe.py` still works: put `ELEVENLABS_API_KEY=...` in `.env` at the repo root (`chmod 600`, never commit it) and use `transcribe.py` instead of `transcribe_local.py`. Skip this unless the user asks for diarization.
+
+### 6. Caption style wizard
+
+Ask the user, one question at a time:
+
+1. **Caption font** (bold sans like "Lato Black" is the house default).
+2. **Emphasis font** (italic serif like "Libre Baskerville"; "same as base" is fine).
+3. **Two colours**: active word colour + emphasis colour, as `#RRGGBB` hex.
+4. **Caption mode**: 2-word UPPERCASE chunks (`"uppercase": true, "max_words_per_page": 2`) or phrase-grouped (`"uppercase": false, "max_words_per_page": null`).
+
+Then:
+
+1. **Verify the fonts exist** — matplotlib ships with the repo deps:
 
     ```bash
-    # a) env var already exported
-    [ -n "$ELEVENLABS_API_KEY" ] && echo "env"
-    # b) .env at repo root already has it
-    grep -q '^ELEVENLABS_API_KEY=..' ~/Developer/video-use/.env 2>/dev/null && echo "dotenv"
+    uv run python -c "
+    from matplotlib import font_manager
+    names = {f.name for f in font_manager.fontManager.ttflist}
+    for want in ['Lato Black', 'Libre Baskerville']:   # substitute user's choices
+        print(want, '->', 'OK' if want in names else 'MISSING')
+    "
     ```
 
-2. If neither is set, ask the user exactly once:
+    If a font is missing, say so and list the closest installed names (`sorted(n for n in names if want.split()[0].lower() in n.lower())`) before writing anything.
 
-    > I need an ElevenLabs API key for transcription (word-level timestamps, speaker diarization, filler tagging). Grab one at https://elevenlabs.io/app/settings/api-keys and paste it here — I'll write it to `~/Developer/video-use/.env`. Or if you already have it exported as `ELEVENLABS_API_KEY`, say "use env" and I'll skip.
+2. **Write `style.json`** into the user's videos directory: copy `style.example.json`, apply their answers, delete the `_comment` key or leave it — it's ignored.
 
-    When the user pastes a key, write it to `~/Developer/video-use/.env`:
+3. **Render a 3-second sample** from any short clip the user has (or a generated test card):
 
     ```bash
-    printf 'ELEVENLABS_API_KEY=%s\n' "$KEY" > ~/Developer/video-use/.env
-    chmod 600 ~/Developer/video-use/.env
+    # black test card with a burned caption, if no clip is at hand
+    ffmpeg -y -f lavfi -i color=c=black:s=1080x1920:d=3 -f lavfi -i anullsrc=r=48000:cl=mono -shortest sample_base.mp4
     ```
 
-    Never echo the key back in tool output. Never commit `.env`.
+    Build a tiny EDL + transcript JSON for two words, run `make_ass_captions.py --style style.json`, burn with `ffmpeg -vf "ass=master.ass"`, and show the user the result. Iterate until they approve, then keep `style.json` as approved.
 
-3. Sanity check with a cheap, quota-free call:
-
-    ```bash
-    curl -s -o /dev/null -w '%{http_code}\n' \
-      -H "xi-api-key: $(sed -n 's/^ELEVENLABS_API_KEY=//p' ~/Developer/video-use/.env)" \
-      https://api.elevenlabs.io/v1/user
-    ```
-
-    `200` means the key works. `401` means the user pasted a wrong/expired key — ask once more and stop. Anything else (network, 5xx), move on and verify during first real transcription.
-
-### 6. Verify end-to-end
+### 7. Verify end-to-end
 
 Run one real thing. Prefer the lightest verification that still proves the pipeline is wired up:
 
@@ -134,9 +154,9 @@ python ~/Developer/video-use/helpers/timeline_view.py --help >/dev/null && echo 
 ffprobe -version | head -1
 ```
 
-Full transcription test is optional at install time — it burns Scribe credits. Better to wait until the user hands you their first clip.
+Full transcription test is cheap now — it's local. If the user has any short clip handy, run `uv run python helpers/transcribe_local.py <clip> --model <chosen>` as the real verification.
 
-### 7. Hand off
+### 8. Hand off
 
 Tell the user, in one short message:
 
@@ -158,5 +178,5 @@ Tell the user, in one short message:
 - `yt-dlp` is optional. Don't block install on it; install lazily the first time a user asks to pull from a URL.
 - Node.js/npm are only needed for HyperFrames or Remotion slots. HyperFrames currently requires Node.js 22+.
 - HyperFrames, Remotion, and Manim are optional animation engines. Don't install or prefer one globally during setup; pick the engine per animation slot in `SKILL.md`. HyperFrames can run through `npx --yes hyperframes ...` in the slot directory. Remotion can be scaffolded with `npx create-video@latest` or installed inside the slot before rendering.
-- Never run transcription as part of install verification unless the user explicitly asks — Scribe costs real money.
+- Local transcription is free — verify with a real clip when one is available. Only the optional ElevenLabs path costs money.
 - If the user is on Linux without a package manager Claude recognizes, print the manual `ffmpeg` install URL and wait rather than guessing.
