@@ -41,6 +41,9 @@ COLOR_EMPHASIS_ACTIVE = "&HFFB6C9&"
 
 SWITCH_CAPTIONS_EVERY_MS = 1100
 
+UPPERCASE = False
+MAX_WORDS_PER_PAGE = None
+
 WORD_CORRECTIONS = {
     "wicks": "Wix",
     "1st": "first",
@@ -119,7 +122,8 @@ def group_pages(tokens: list[dict]) -> list[list[dict]]:
     for t in tokens:
         if cur_start is None:
             cur_start = t["startMs"]
-        if t["endMs"] - cur_start > SWITCH_CAPTIONS_EVERY_MS and cur:
+        full = MAX_WORDS_PER_PAGE is not None and len(cur) >= MAX_WORDS_PER_PAGE
+        if cur and (t["endMs"] - cur_start > SWITCH_CAPTIONS_EVERY_MS or full):
             pages.append(cur)
             cur = []
             cur_start = t["startMs"]
@@ -141,6 +145,39 @@ def escape_ass(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", r"\{").replace("}", r"\}")
 
 
+def hex_to_ass(hex_color: str) -> str:
+    """'#RRGGBB' → ASS '&HBBGGRR&'."""
+    h = hex_color.lstrip("#")
+    r, g, b = h[0:2], h[2:4], h[4:6]
+    return f"&H{b}{g}{r}&".upper()
+
+
+def apply_style(style: dict) -> None:
+    """Override module style constants from a style.json dict. Unknown keys ignored."""
+    g = globals()
+    direct = {
+        "font_base": "FONT_BASE", "font_emphasis": "FONT_EMPHASIS",
+        "font_size": "FONT_SIZE", "margin_v": "MARGIN_V",
+        "play_res_x": "PLAY_RES_X", "play_res_y": "PLAY_RES_Y",
+        "switch_captions_every_ms": "SWITCH_CAPTIONS_EVERY_MS",
+        "uppercase": "UPPERCASE", "max_words_per_page": "MAX_WORDS_PER_PAGE",
+        "word_corrections": "WORD_CORRECTIONS", "merge_phrases": "MERGE_PHRASES",
+    }
+    for key, const in direct.items():
+        if key in style:
+            g[const] = style[key]
+    colors = {
+        "color_inactive": "COLOR_INACTIVE", "color_active": "COLOR_ACTIVE",
+        "color_emphasis_inactive": "COLOR_EMPHASIS_INACTIVE",
+        "color_emphasis_active": "COLOR_EMPHASIS_ACTIVE",
+    }
+    for key, const in colors.items():
+        if key in style:
+            g[const] = hex_to_ass(style[key])
+    if "emphasis_words" in style:
+        g["EMPHASIS_WORDS"] = set(style["emphasis_words"])
+
+
 def build_dialogue(page: list[dict]) -> str:
     page_start = page[0]["startMs"]
     page_end = page[-1]["endMs"]
@@ -149,6 +186,8 @@ def build_dialogue(page: list[dict]) -> str:
         text = tok["text"].strip()
         if not text:
             continue
+        if UPPERCASE:
+            text = text.upper()
         emph = is_emphasis(text)
         from_ms = max(0, tok["startMs"] - page_start)
         to_ms = max(0, tok["endMs"] - page_start)
@@ -225,6 +264,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Generate master.ass with house-style per-word captions")
     ap.add_argument("--edl", type=Path, required=True)
     ap.add_argument("-o", "--output", type=Path, required=True)
+    ap.add_argument("--style", type=Path, default=None,
+                    help="Optional style.json overriding fonts/colors/word lists")
     args = ap.parse_args()
 
     edl_path = args.edl.resolve()
@@ -232,6 +273,9 @@ def main() -> None:
         sys.exit(f"edl not found: {edl_path}")
     edl = json.loads(edl_path.read_text())
     transcripts_dir = edl_path.parent / "transcripts"
+
+    if args.style:
+        apply_style(json.loads(args.style.resolve().read_text()))
 
     tokens = words_for_edl(edl, transcripts_dir)
     tokens = merge_phrases(tokens)
