@@ -3,13 +3,14 @@ name = "video-use"
 version = "0.1.0"
 description = "Conversation-driven video editor skill for Claude Code"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 dependencies = [
     "requests",
     "librosa",
     "matplotlib",
     "pillow",
     "numpy",
+    "faster-whisper>=1.2.1",
 ]
 
 [project.optional-dependencies]
