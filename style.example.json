@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy to your videos directory as style.json. The agent reads it each session; make_ass_captions.py consumes it via --style. Colors are #RRGGBB hex.",
+  "font_base": "Lato Black",
+  "font_emphasis": "Libre Baskerville",
+  "font_size": 78,
+  "color_inactive": "#FFFFFF",
+  "color_active": "#FFD86B",
+  "color_emphasis_inactive": "#E3D7FF",
+  "color_emphasis_active": "#C9B6FF",
+  "uppercase": false,
+  "max_words_per_page": null,
+  "switch_captions_every_ms": 1100,
+  "word_corrections": {},
+  "merge_phrases": [],
+  "emphasis_words": [],
+  "whisper_model": "large-v3"
+}
