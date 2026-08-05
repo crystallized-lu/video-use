@@ -538,9 +538,17 @@ def build_final_composite(
     # Subtitles LAST — Rule 1
     if has_subs:
         subs_abs = str(subtitles_path.resolve()).replace(":", r"\:").replace("'", r"\'")
-        filter_parts.append(
-            f"{current}subtitles='{subs_abs}':force_style='{SUB_FORCE_STYLE}'[outv]"
-        )
+        # .ass files carry their own [V4+ Styles]; force_style would override
+        # custom per-event tags (per-word color, font swap). Apply force_style
+        # only to .srt where the file has no embedded styling.
+        if subtitles_path.suffix.lower() == ".ass":
+            filter_parts.append(
+                f"{current}subtitles='{subs_abs}'[outv]"
+            )
+        else:
+            filter_parts.append(
+                f"{current}subtitles='{subs_abs}':force_style='{SUB_FORCE_STYLE}'[outv]"
+            )
         out_label = "[outv]"
     else:
         # Rename the last overlay output to [outv] for consistency
