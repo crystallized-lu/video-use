@@ -98,7 +98,7 @@ Transcription runs locally via faster-whisper (`helpers/transcribe_local.py`). N
 Pick a model size with the user (one question):
 
 - **large-v3** (~3 GB) — best accuracy. Recommended on Apple Silicon or any recent multi-core CPU.
-- **medium / small** — noticeably faster on older or low-RAM machines; accuracy still fine for clean speech.
+- **medium / small** — noticeably faster on older or low-RAM machines; accuracy still fine for clean speech. Note: small/base models can emit degenerate word timestamps (identical or zero-duration runs across several consecutive words), which degrades per-word caption timing. Prefer medium or large-v3 whenever captions matter.
 
 Pre-download it now so the user's first real transcription isn't a multi-gigabyte surprise:
 
@@ -121,18 +121,24 @@ Ask the user, one question at a time:
 
 Then:
 
-1. **Verify the fonts exist** — matplotlib ships with the repo deps:
+1. **Verify the fonts exist** — check with `fc-list` first, not matplotlib.
+   matplotlib's font cache does not pick up fonts installed the normal OS way
+   (e.g. `~/Library/Fonts` on macOS) unless its cache is rebuilt, so it
+   routinely reports installed fonts as missing — a false negative right at
+   first-time setup:
 
     ```bash
-    uv run python -c "
-    from matplotlib import font_manager
-    names = {f.name for f in font_manager.fontManager.ttflist}
-    for want in ['Lato Black', 'Libre Baskerville']:   # substitute user's choices
-        print(want, '->', 'OK' if want in names else 'MISSING')
-    "
+    fc-list | grep -i "Lato Black"          # substitute user's choices
+    fc-list | grep -i "Libre Baskerville"
     ```
 
-    If a font is missing, say so and list the closest installed names (`sorted(n for n in names if want.split()[0].lower() in n.lower())`) before writing anything.
+    If `fc-list` isn't available, list font directories directly instead:
+    macOS — `ls ~/Library/Fonts /Library/Fonts 2>/dev/null | grep -i "<font name>"`;
+    Linux — `ls ~/.local/share/fonts /usr/share/fonts -R 2>/dev/null | grep -i "<font name>"`.
+
+    If a font is genuinely missing, say so and list the closest installed
+    names (`fc-list | grep -i "<family root, e.g. lato>"`) before writing
+    anything.
 
 2. **Write `style.json`** into the user's videos directory: copy `style.example.json`, apply their answers, delete the `_comment` key or leave it — it's ignored.
 
