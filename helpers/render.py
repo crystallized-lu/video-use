@@ -157,6 +157,9 @@ def extract_segment(
     out_path: Path,
     preview: bool = False,
     draft: bool = False,
+    fps: int = 24,
+    lossless: bool = False,
+    audio_bitrate: str = "192k",
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
 
@@ -202,9 +205,13 @@ def extract_segment(
         "-t", f"{duration:.3f}",
         "-vf", vf,
         "-af", af,
-        "-c:v", "libx264", "-preset", preset, "-crf", crf,
-        "-pix_fmt", "yuv420p", "-r", "24",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        # Lossless intermediate (hq): the segment encode then costs nothing and
+        # the final composite is the only generation of loss. Measured on this
+        # footage: lossless -> CRF 14 scores identically to a single encode.
+        *(["-c:v", "libx264", "-preset", "ultrafast", "-qp", "0"] if lossless
+          else ["-c:v", "libx264", "-preset", preset, "-crf", crf]),
+        "-pix_fmt", "yuv420p", "-r", str(fps),
+        "-c:a", "aac", "-b:a", audio_bitrate, "-ar", "48000",
         "-movflags", "+faststart",
         str(out_path),
     ]
@@ -216,6 +223,9 @@ def extract_all_segments(
     edit_dir: Path,
     preview: bool,
     draft: bool = False,
+    fps: int = 24,
+    lossless: bool = False,
+    audio_bitrate: str = "192k",
 ) -> list[Path]:
     """Extract every EDL range into edit_dir/clips_graded/seg_NN.mp4.
     Returns the ordered list of segment paths.
@@ -255,7 +265,9 @@ def extract_all_segments(
         print(f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  ({duration:5.2f}s)  {note}")
         if is_auto:
             print(f"        grade: {seg_filter or '(none)'}")
-        extract_segment(src_path, start, duration, seg_filter, out_path, preview=preview, draft=draft)
+        extract_segment(src_path, start, duration, seg_filter, out_path,
+                        preview=preview, draft=draft, fps=fps,
+                        lossless=lossless, audio_bitrate=audio_bitrate)
         seg_paths.append(out_path)
 
     return seg_paths
@@ -432,6 +444,7 @@ def apply_loudnorm_two_pass(
     input_path: Path,
     output_path: Path,
     preview: bool = False,
+    audio_bitrate: str = "192k",
 ) -> bool:
     """Run two-pass loudnorm on input_path, write normalized copy to output_path.
 
@@ -449,7 +462,7 @@ def apply_loudnorm_two_pass(
             "-i", str(input_path),
             "-c:v", "copy",
             "-af", filter_str,
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-c:a", "aac", "-b:a", audio_bitrate, "-ar", "48000",
             "-movflags", "+faststart",
             str(output_path),
         ]
@@ -462,7 +475,8 @@ def apply_loudnorm_two_pass(
     measurement = measure_loudness(input_path)
     if measurement is None:
         print("  loudnorm measurement failed — falling back to 1-pass")
-        return apply_loudnorm_two_pass(input_path, output_path, preview=True)
+        return apply_loudnorm_two_pass(input_path, output_path, preview=True,
+                                      audio_bitrate=audio_bitrate)
 
     print(f"    measured: I={measurement['input_i']} LUFS  "
           f"TP={measurement['input_tp']}  LRA={measurement['input_lra']}")
@@ -481,7 +495,7 @@ def apply_loudnorm_two_pass(
         "-i", str(input_path),
         "-c:v", "copy",
         "-af", filter_str,
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-c:a", "aac", "-b:a", audio_bitrate, "-ar", "48000",
         "-movflags", "+faststart",
         str(output_path),
     ]
@@ -499,6 +513,9 @@ def build_final_composite(
     subtitles_path: Path | None,
     out_path: Path,
     edit_dir: Path,
+    crf: str = "18",
+    preset: str = "fast",
+    fps: int = 24,
 ) -> None:
     """Final pass: base → overlays (PTS-shifted) → subtitles LAST → out.
 
@@ -523,8 +540,15 @@ def build_final_composite(
         t = float(ov["start_in_output"])
         filter_parts.append(f"[{idx}:v]setpts=PTS-STARTPTS+{t}/TB[a{idx}]")
 
+    # Zero the video start timestamp. Concat leaves the video track starting a
+    # fraction of a frame late; each re-encode compounds it, and the muxer
+    # records the result as an edit-list delay on the video track only — so the
+    # audio plays ahead of the picture. Harmless-looking at 20ms, clearly
+    # audible as lip-sync drift once it reaches a whole frame.
+    filter_parts.append("[0:v]setpts=PTS-STARTPTS[vbase]")
+
     # Chain overlays on top of base
-    current = "[0:v]"
+    current = "[vbase]"
     for idx, ov in enumerate(overlays, start=1):
         t = float(ov["start_in_output"])
         dur = float(ov["duration"])
@@ -566,8 +590,18 @@ def build_final_composite(
         "-filter_complex", filter_complex,
         "-map", out_label,
         "-map", "0:a",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:v", "libx264", "-preset", preset, "-crf", crf,
         "-pix_fmt", "yuv420p",
+        # Device compatibility. Without an explicit level x264 signalled 6.2 for
+        # 1080x1920@30, which no iPhone hardware decoder accepts — the file
+        # simply refuses to play and iMovie will not import it. 4.2 covers this
+        # resolution and frame rate with room to spare. The bitrate cap keeps
+        # the stream honest against the level it declares; at CRF 14 the average
+        # is ~5 Mbps, so 20M never binds. CFR because iMovie dislikes variable
+        # frame rate, which concatenated segments otherwise produce.
+        "-profile:v", "high", "-level:v", "4.2",
+        "-maxrate", "20M", "-bufsize", "40M",
+        "-fps_mode", "cfr", "-r", str(fps),
         "-c:a", "copy",
         "-movflags", "+faststart",
         str(out_path),
@@ -605,6 +639,19 @@ def main() -> None:
         help="Skip subtitles even if the EDL references one",
     )
     ap.add_argument(
+        "--fps",
+        type=int,
+        default=24,
+        help="Output frame rate (default 24). Use the source rate to avoid frame "
+             "decimation, which reads as lip-sync drift on talking heads.",
+    )
+    ap.add_argument(
+        "--hq",
+        action="store_true",
+        help="Highest quality: lossless segment intermediates, CRF 14 preset slow "
+             "final encode, 320k audio. Larger temp files and a slower render.",
+    )
+    ap.add_argument(
         "--no-loudnorm",
         action="store_true",
         help="Skip audio loudness normalization. Default is on (-14 LUFS, -1 dBTP, LRA 11).",
@@ -621,7 +668,8 @@ def main() -> None:
 
     # 1. Extract per-segment (auto-grade per range if EDL grade is "auto")
     segment_paths = extract_all_segments(
-        edl, edit_dir, preview=args.preview, draft=args.draft
+        edl, edit_dir, preview=args.preview, draft=args.draft, fps=args.fps,
+        lossless=args.hq, audio_bitrate=("320k" if args.hq else "192k"),
     )
 
     # 2. Concat → base
@@ -648,15 +696,20 @@ def main() -> None:
 
     # 4. Composite (overlays + subtitles LAST) → intermediate (pre-loudnorm) path
     overlays = edl.get("overlays") or []
+    comp_crf, comp_preset = ("14", "slow") if args.hq else ("18", "fast")
+    audio_bitrate = "320k" if args.hq else "192k"
     if args.no_loudnorm:
         # Composite directly to final output
-        build_final_composite(base_path, overlays, subs_path, out_path, edit_dir)
+        build_final_composite(base_path, overlays, subs_path, out_path, edit_dir,
+                              crf=comp_crf, preset=comp_preset, fps=args.fps)
     else:
         # Composite to a temp file, then run loudnorm → final output
         tmp_composite = out_path.with_suffix(".prenorm.mp4")
-        build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir)
+        build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir,
+                              crf=comp_crf, preset=comp_preset, fps=args.fps)
         print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
-        apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
+        apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft,
+                                audio_bitrate=audio_bitrate)
         tmp_composite.unlink(missing_ok=True)
 
     size_mb = out_path.stat().st_size / (1024 * 1024)
