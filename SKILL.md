@@ -31,6 +31,13 @@ These are the things where deviation produces silent failures or broken output. 
 10. **Parallel sub-agents for multiple animations.** Never sequential. Spawn N at once via the `Agent` tool; total wall time ≈ slowest one.
 11. **Strategy confirmation before execution.** Never touch the cut until the user has approved the plain-English plan.
 12. **All session outputs in `<videos_dir>/edit/`.** Never write inside the `video-use/` project directory.
+13. **An ASR word boundary is never a cut point.** Snap every edge to the audio itself. The
+    label is a hint about *what* was said, not *when* it stopped.
+14. **Delivery format is part of the deliverable.** `ffprobe` every final before handing it
+    over: H.264 High profile at **level ≤ 4.2**, constant frame rate, both streams
+    `start_time=0.000000`, `+faststart`. Unconstrained x264 signals **level 6.2** for
+    1080×1920@30 — no iPhone will play it and iMovie will not import it. A file that does
+    not open is not a deliverable, however good the edit is.
 
 Everything else in this document is a worked example. Deviate whenever the material calls for it.
 
@@ -332,6 +339,68 @@ Append one section per session at `<edit>/project.md`:
 
 On startup, read `project.md` if it exists and summarize the last session in one sentence before asking whether to continue.
 
+## ASR timings: how they fail, and what to do
+
+Local Whisper's word timings are mostly good — median overshoot 0 ms across a 737-word
+talking head — but ~8% of labels run long, and **the bad ones cluster exactly where you
+want to cut**, because deletion boundaries are where labels absorb silence and noise. Every
+one of these was observed in a single session, and each cost a render:
+
+- **Non-speech absorbed into a word label.** A cough was transcribed as the word "the",
+  isolated by 5s of silence either side, and survived every edge-based check because it
+  *had* a label. A separate utterance sat inside the label for "bzzz.". Screen for
+  **single-token segments isolated by long silence**, and plot the envelope across the
+  *whole* label, not just its edges.
+- **Short words stretched across neighbouring silence.** "but" labelled 1.70s for a 100 ms
+  word; "and" labelled from 402.60 but not spoken until 404.85 — which put its caption 2.2s
+  early. If the stretch sits at a segment edge, correct it *before* grouping so the dead air
+  leaves the cut; if it is mid-take, correct it for **captions only** — that pause is the
+  performance, and deleting it changes the delivery.
+- **Whole stretches drifting 0.5–1.1s** and re-converging later in the same take.
+- **Unlabelled voiced audio between words.** A word's tail can sit in a gap the ASR labels
+  as nothing at all. Two separate "you cut my word off" reports traced to exactly this —
+  and every edge-based check called those words complete, because the label ended where the
+  label ended.
+
+Fix the class, not the instance: run a **forced aligner** (WhisperX / wav2vec2, local, so
+nothing leaves the machine) over the Whisper text before building an EDL. Hosted ElevenLabs
+Scribe additionally tags audio events such as coughs — but it sends audio off-machine, which
+is the user's decision, not an assumption to make for them.
+
+## Diagnosing a cut the user says sounds wrong
+
+Match the instrument to the question. Using the wrong one produces confident, wrong fixes:
+
+| Report | Right instrument |
+|---|---|
+| "the word is cut off" | envelope across the whole label **and past it** — the missing audio is often unlabelled |
+| "there's a stray sound" | **spectral centroid**, not level: a sustained fricative after a gap looks identical to a stray noise on a level meter |
+| "it sounds like the wrong word" | check the **onset**, not the body — a clipped vowel onset reads as a different word ("you" cut mid-vowel reads as "or") |
+
+Vowels sit under ~800 Hz with >90% of energy below 1 kHz; fricatives above ~3 kHz. Compare
+against a known instance of the same phoneme elsewhere in the recording as a control.
+
+A **single-frame formant jump is not a word boundary** — require F2 to stay moved across
+several frames, then find the next real silence, which is usually the honest edge.
+
+And the rule that overrides all of the above: **when the user's ear and your measurement
+disagree about whether something *reads* as a word, the user is right.** Measurement answers
+"what is this acoustically". It cannot answer "does this work in place".
+
+## Session workflow — keeping the round count down
+
+- **Prefer whole-phrase cuts.** Every sub-second splice or single-word graft adds a boundary
+  that can be subtly wrong, and a session built on them needs roughly a correction round per
+  splice. If the user's requested text would need a mid-phrase splice, say so and offer the
+  as-spoken alternative first — let them choose the fragility knowingly.
+- **One change per render**, or label them explicitly. Bundling two fixes means you cannot
+  tell which one worked, and a wrong bundle costs two rounds to unwind.
+- **Review on drafts, not finals.** `--draft` is ~1 min against ~6 for HQ and is perfectly
+  good for judging a join. Spend the HQ render once, at the end.
+- **Batch the review.** Hand over one preview *plus a numbered list of the joins you are
+  least confident about*, rather than waiting for the user to find them one at a time.
+- **Check the delivery format on the first render, not the last** (Hard Rule 14).
+
 ## Anti-patterns
 
 Things that consistently fail regardless of style:
@@ -349,3 +418,8 @@ Things that consistently fail regardless of style:
 - **Editing before confirming the strategy.** Never.
 - **Re-transcribing cached sources.** Immutable outputs of immutable inputs.
 - **Assuming what kind of video it is.** Look first, ask second, edit last.
+- **Cutting on an ASR label instead of on the audio.**
+- **Diagnosing a stray sound from a level meter.** Fricatives and stray noises look the same; the spectrum tells them apart.
+- **Bundling two fixes into one render**, then being unable to attribute the result.
+- **Reviewing every iteration on a full-quality render** when a draft answers the question.
+- **Shipping without an ffprobe delivery check.** Seventeen renders of waveform and SSIM verification do not help if the file will not open on a phone.
