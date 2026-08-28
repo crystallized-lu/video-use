@@ -152,8 +152,27 @@ def is_hdr_source(video: Path) -> bool:
         return False
 
 
-def is_portrait_source(video: Path) -> bool:
-    """Return True if the video's height > width (portrait / vertical)."""
+def display_dimensions(video: Path) -> tuple[int, int]:
+    """(width, height) as the frame DISPLAYS, after any rotation metadata.
+
+    iPhone (and many phones) store landscape pixels plus a 90° display-matrix
+    rotation, so a vertical clip's raw stream width/height still read as
+    landscape. This ffmpeg build does not expose that rotation reliably through
+    ffprobe (side_data comes back empty), so we decode the first frame — ffmpeg
+    auto-applies the rotation — and read its true size from `showinfo`. Falls
+    back to raw stream dims if the decode fails.
+    """
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-i", str(video),
+             "-vf", "showinfo", "-frames:v", "1", "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+        m = re.search(r"\bs:(\d+)x(\d+)", out.stderr)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    except Exception:
+        pass
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -162,9 +181,16 @@ def is_portrait_source(video: Path) -> bool:
             capture_output=True, text=True, check=True,
         )
         w, h = map(int, out.stdout.strip().split(","))
-        return h > w
+        return w, h
     except Exception:
-        return False
+        return 0, 0
+
+
+def is_portrait_source(video: Path) -> bool:
+    """Return True if the video DISPLAYS as portrait (height > width),
+    accounting for rotation metadata (see display_dimensions)."""
+    w, h = display_dimensions(video)
+    return h > w
 
 
 # -------- Per-segment extraction (Rule 2 + Rule 3) --------------------------
