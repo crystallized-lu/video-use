@@ -17,16 +17,37 @@ Usage:
     python helpers/render.py <edl.json> -o preview.mp4 --preview
     python helpers/render.py <edl.json> -o final.mp4 --build-subtitles
     python helpers/render.py <edl.json> -o final.mp4 --no-subtitles
+    python helpers/render.py <edl.json> -o final.mp4 --skin-fix      # iPhone HLG red/detail fix
+    python helpers/render.py <edl.json> -o final.mp4 --low-compute   # gentle on the machine
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+# CPU cap injected into every heavy ffmpeg encode. Empty = ffmpeg auto (all
+# cores). Set by --threads / --low-compute so a render can stay out of the way
+# of foreground work on the machine.
+FF_THREAD_FLAGS: list[str] = []
+
+# iPhone HLG→SDR skin correction (opt-in via --skin-fix). The HDR tonemap
+# oversaturates skin (reads as a red/flushed face) AND flattens micro-contrast
+# (skin looks waxy, pores/lines gone); the default downscaler softens further.
+# This neutralises the red (global saturation pull + a slight red→neutral white
+# balance) and restores pore detail (lanczos downscale + light unsharp). Keep the
+# tonemap at desat=0 — desat>0 makes pale specular blotches on oily skin. Verified
+# frame-for-frame against source on real iPhone HLG selfie footage, 2026-08.
+SKIN_FIX_CHAIN = (
+    "colorbalance=rm=-0.06:rs=-0.04:bm=0.03,"
+    "eq=saturation=0.74,"
+    "unsharp=5:5:0.6:5:5:0.0"
+)
 
 try:
     from grade import get_preset, auto_grade_for_clip  # same directory
@@ -160,6 +181,7 @@ def extract_segment(
     fps: int = 24,
     lossless: bool = False,
     audio_bitrate: str = "192k",
+    skin_fix: bool = False,
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
 
@@ -178,6 +200,8 @@ def extract_segment(
         scale = "scale=-2:1280" if portrait else "scale=1280:-2"
     else:
         scale = "scale=-2:1920" if portrait else "scale=1920:-2"
+    if skin_fix:
+        scale += ":flags=lanczos"   # sharper downscale — recovers fine detail
 
     vf_parts: list[str] = []
     if is_hdr_source(source):
@@ -185,6 +209,8 @@ def extract_segment(
     vf_parts.append(scale)
     if grade_filter:
         vf_parts.append(grade_filter)
+    if skin_fix:
+        vf_parts.append(SKIN_FIX_CHAIN)   # colour-neutralise + unsharp, applied last
     vf = ",".join(vf_parts)
 
     # 30ms audio fades at both edges (Rule 3) — prevent pops
@@ -199,7 +225,7 @@ def extract_segment(
         preset, crf = "fast", "20"
 
     cmd = [
-        "ffmpeg", "-y",
+        "ffmpeg", *FF_THREAD_FLAGS, "-y",
         "-ss", f"{seg_start:.3f}",
         "-i", str(source),
         "-t", f"{duration:.3f}",
@@ -226,6 +252,7 @@ def extract_all_segments(
     fps: int = 24,
     lossless: bool = False,
     audio_bitrate: str = "192k",
+    skin_fix: bool = False,
 ) -> list[Path]:
     """Extract every EDL range into edit_dir/clips_graded/seg_NN.mp4.
     Returns the ordered list of segment paths.
@@ -267,7 +294,8 @@ def extract_all_segments(
             print(f"        grade: {seg_filter or '(none)'}")
         extract_segment(src_path, start, duration, seg_filter, out_path,
                         preview=preview, draft=draft, fps=fps,
-                        lossless=lossless, audio_bitrate=audio_bitrate)
+                        lossless=lossless, audio_bitrate=audio_bitrate,
+                        skin_fix=skin_fix)
         seg_paths.append(out_path)
 
     return seg_paths
@@ -585,7 +613,7 @@ def build_final_composite(
     filter_complex = ";".join(filter_parts)
 
     cmd = [
-        "ffmpeg", "-y",
+        "ffmpeg", *FF_THREAD_FLAGS, "-y",
         *inputs,
         "-filter_complex", filter_complex,
         "-map", out_label,
@@ -656,7 +684,41 @@ def main() -> None:
         action="store_true",
         help="Skip audio loudness normalization. Default is on (-14 LUFS, -1 dBTP, LRA 11).",
     )
+    ap.add_argument(
+        "--skin-fix",
+        action="store_true",
+        help="iPhone HLG skin correction: neutralise the red the HDR tonemap adds to "
+             "skin and restore pore detail (lanczos downscale + light unsharp). "
+             "Recommended for iPhone HDR selfie footage; harmless on other sources.",
+    )
+    ap.add_argument(
+        "--threads",
+        type=int,
+        default=0,
+        help="Cap ffmpeg/filter threads per encode (0 = auto/all cores). Lower it to "
+             "keep the machine responsive during a render.",
+    )
+    ap.add_argument(
+        "--low-compute",
+        action="store_true",
+        help="Run gently: 2 threads + lowest process priority (nice 19). Much slower "
+             "wall time, but leaves the machine usable. Overrides --threads.",
+    )
     args = ap.parse_args()
+
+    # CPU throttling: cap ffmpeg threads and (for --low-compute) de-prioritise the
+    # whole process tree so foreground work stays responsive.
+    threads = 2 if args.low_compute else args.threads
+    if threads:
+        global FF_THREAD_FLAGS
+        FF_THREAD_FLAGS = ["-threads", str(threads),
+                           "-filter_threads", str(threads),
+                           "-filter_complex_threads", str(threads)]
+    if args.low_compute:
+        try:
+            os.nice(19)
+        except OSError:
+            pass
 
     edl_path = args.edl.resolve()
     if not edl_path.exists():
@@ -670,6 +732,7 @@ def main() -> None:
     segment_paths = extract_all_segments(
         edl, edit_dir, preview=args.preview, draft=args.draft, fps=args.fps,
         lossless=args.hq, audio_bitrate=("320k" if args.hq else "192k"),
+        skin_fix=args.skin_fix,
     )
 
     # 2. Concat → base

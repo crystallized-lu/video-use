@@ -86,7 +86,7 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 - **`transcribe_batch.py <videos_dir>`** — 4-worker parallel hosted Scribe transcription. Use for multi-take when Scribe is needed.
 - **`pack_transcripts.py --edit-dir <dir>`** — `transcripts/*.json` → `takes_packed.md` (phrase-level, break on silence ≥ 0.5s).
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
-- **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline.
+- **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline. `--skin-fix` for iPhone HLG footage (see below). `--low-compute` (or `--threads N`) to render gently and keep the machine responsive.
 - **`grade.py <in> -o <out>`** — ffmpeg filter chain grade. Presets + `--filter '<raw>'` for custom.
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
@@ -208,6 +208,32 @@ Mental model is ASC CDL. Per channel: `out = (in * slope + offset) ** power`, th
 For anything else — portraiture, nature, product, music video, documentary — invent your own chain. `grade.py --filter '<raw ffmpeg>'` accepts any filter string.
 
 Hard rules: apply **per-segment during extraction** (not post-concat, which re-encodes twice). Never go aggressive without testing skin tones.
+
+### iPhone HLG footage — `--skin-fix`
+
+iPhone shoots HLG HDR (`color_transfer=arib-std-b67`). Tone-mapping it to SDR has two
+side effects on skin: it **oversaturates → a red/flushed face**, and **compresses
+micro-contrast → waxy skin, pores and fine lines gone**. The default downscaler softens
+further. Verified against source: the phone's own display shows neutral, textured skin;
+the naive render shows neither.
+
+`render.py --skin-fix` corrects both — a global saturation pull + a slight red→neutral
+white balance (kills the red without touching the room's warm light), a **lanczos**
+downscale, and a light **unsharp** (restores pores). It keeps the tonemap at `desat=0`:
+raising `desat` desaturates highlights and leaves **pale specular blotches** on oily skin,
+which looks worse. Recommended for any iPhone HDR selfie; harmless on SDR sources. If the
+neutral look is too cool/warm for a given clip, hand-tune `SKIN_FIX_CHAIN` in `render.py`
+(the `eq=saturation` / `colorbalance` values) — and remember the user's eye on a real phone
+is the reference, not a chat-image still.
+
+### Running gently — `--low-compute` / `--threads N`
+
+4K HLG tone-mapping is CPU-heavy and can make the machine sluggish while rendering.
+`--low-compute` caps ffmpeg to 2 threads and drops the process to lowest priority
+(`nice 19`) — much slower wall time, but foreground work stays responsive. `--threads N`
+caps threads without the priority drop. Prefer these to parallel renders when the user is
+working on the same machine; a slower render they don't feel beats a fast one that freezes
+their screen.
 
 ## Subtitles (when requested)
 
