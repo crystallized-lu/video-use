@@ -17,7 +17,8 @@ Usage:
     python helpers/render.py <edl.json> -o preview.mp4 --preview
     python helpers/render.py <edl.json> -o final.mp4 --build-subtitles
     python helpers/render.py <edl.json> -o final.mp4 --no-subtitles
-    python helpers/render.py <edl.json> -o final.mp4 --skin-fix      # iPhone HLG red/detail fix
+    python helpers/render.py <edl.json> -o final.mp4 --skin-fix      # iPhone HLG→SDR red/detail fix
+    python helpers/render.py <edl.json> -o final.mp4 --hdr-preserve  # keep HDR (phone look / Instagram)
     python helpers/render.py <edl.json> -o final.mp4 --low-compute   # gentle on the machine
 """
 
@@ -152,6 +153,49 @@ def is_hdr_source(video: Path) -> bool:
         return False
 
 
+# -------- HDR-preserve (keep the phone look) --------------------------------
+#
+# The opposite choice to tone-mapping. Instagram/iOS do not flatten HDR to SDR —
+# they carry the video HDR end-to-end, which is why an uploaded clip looks like
+# the phone. Tone-mapping HLG→SDR *cannot* match that (wider gamut + brightness
+# squeezed into Rec.709), and no grade recovers it. So --hdr-preserve skips the
+# tonemap entirely, keeps everything 10-bit, and encodes HEVC (VideoToolbox,
+# main10) with the source's color tags intact. Captions burn on the HLG stream.
+# Caveat: this keeps HLG *static* HDR; the source's Dolby Vision RPU (per-frame
+# dynamic metadata) is dropped — full DoVi passthrough needs a different encoder.
+# Verified against source on-device (iPhone HLG selfie, 2026-09). For SDR
+# deliverables use --skin-fix instead.
+
+
+def source_color_tags(video: Path) -> list[str]:
+    """ffmpeg args stamping the output with the source's HDR color tags, so an
+    HDR-preserve render keeps the HLG/PQ signaling players need. Defaults to HLG
+    Rec.2020 when the probe comes back empty/unknown."""
+    d: dict[str, str] = {}
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=color_primaries,color_transfer,color_space",
+             "-of", "default=noprint_wrappers=1", str(video)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        for line in out.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                d[k.strip()] = v.strip()
+    except Exception:
+        pass
+
+    def pick(key: str, default: str) -> str:
+        v = d.get(key, "")
+        return v if v and v != "unknown" else default
+
+    return ["-color_primaries", pick("color_primaries", "bt2020"),
+            "-color_trc",        pick("color_transfer", "arib-std-b67"),
+            "-colorspace",       pick("color_space", "bt2020nc"),
+            "-color_range",      "tv"]
+
+
 def display_dimensions(video: Path) -> tuple[int, int]:
     """(width, height) as the frame DISPLAYS, after any rotation metadata.
 
@@ -208,6 +252,7 @@ def extract_segment(
     lossless: bool = False,
     audio_bitrate: str = "192k",
     skin_fix: bool = False,
+    hdr_preserve: bool = False,
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
 
@@ -221,22 +266,27 @@ def extract_segment(
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # HDR-preserve wins over skin-fix (which is the SDR-tonemap correction).
+    hdr = hdr_preserve and is_hdr_source(source)
+
     portrait = is_portrait_source(source)
     if draft:
         scale = "scale=-2:1280" if portrait else "scale=1280:-2"
     else:
         scale = "scale=-2:1920" if portrait else "scale=1920:-2"
-    if skin_fix:
+    if skin_fix or hdr:
         scale += ":flags=lanczos"   # sharper downscale — recovers fine detail
 
     vf_parts: list[str] = []
-    if is_hdr_source(source):
-        vf_parts.append(TONEMAP_CHAIN)
+    if is_hdr_source(source) and not hdr:
+        vf_parts.append(TONEMAP_CHAIN)    # HLG/PQ → Rec.709 SDR (skipped when preserving HDR)
     vf_parts.append(scale)
     if grade_filter:
         vf_parts.append(grade_filter)
-    if skin_fix:
+    if skin_fix and not hdr:
         vf_parts.append(SKIN_FIX_CHAIN)   # colour-neutralise + unsharp, applied last
+    if hdr:
+        vf_parts.append("format=yuv420p10le")   # stay 10-bit through the intermediate
     vf = ",".join(vf_parts)
 
     # 30ms audio fades at both edges (Rule 3) — prevent pops
@@ -262,7 +312,8 @@ def extract_segment(
         # footage: lossless -> CRF 14 scores identically to a single encode.
         *(["-c:v", "libx264", "-preset", "ultrafast", "-qp", "0"] if lossless
           else ["-c:v", "libx264", "-preset", preset, "-crf", crf]),
-        "-pix_fmt", "yuv420p", "-r", str(fps),
+        "-pix_fmt", "yuv420p10le" if hdr else "yuv420p", "-r", str(fps),
+        *(source_color_tags(source) if hdr else []),
         "-c:a", "aac", "-b:a", audio_bitrate, "-ar", "48000",
         "-movflags", "+faststart",
         str(out_path),
@@ -279,6 +330,7 @@ def extract_all_segments(
     lossless: bool = False,
     audio_bitrate: str = "192k",
     skin_fix: bool = False,
+    hdr_preserve: bool = False,
 ) -> list[Path]:
     """Extract every EDL range into edit_dir/clips_graded/seg_NN.mp4.
     Returns the ordered list of segment paths.
@@ -321,7 +373,7 @@ def extract_all_segments(
         extract_segment(src_path, start, duration, seg_filter, out_path,
                         preview=preview, draft=draft, fps=fps,
                         lossless=lossless, audio_bitrate=audio_bitrate,
-                        skin_fix=skin_fix)
+                        skin_fix=skin_fix, hdr_preserve=hdr_preserve)
         seg_paths.append(out_path)
 
     return seg_paths
@@ -570,6 +622,7 @@ def build_final_composite(
     crf: str = "18",
     preset: str = "fast",
     fps: int = 24,
+    hdr_preserve: bool = False,
 ) -> None:
     """Final pass: base → overlays (PTS-shifted) → subtitles LAST → out.
 
@@ -638,23 +691,39 @@ def build_final_composite(
 
     filter_complex = ";".join(filter_parts)
 
+    if hdr_preserve:
+        # Keep the HDR: HEVC main10 via VideoToolbox, 10-bit, source color tags
+        # carried through from the base (the segments were extracted 10-bit with
+        # the HLG/PQ tags). hvc1 tag so Apple players recognize it. No H.264 level
+        # dance — HEVC HDR is played by the phone's HEVC decoder, not the H.264 one.
+        vcodec = [
+            "-c:v", "hevc_videotoolbox", "-profile:v", "main10",
+            "-pix_fmt", "p010le", "-tag:v", "hvc1",
+            "-b:v", "20M" if preset == "slow" else "14M",
+            *source_color_tags(base_path),
+        ]
+    else:
+        vcodec = [
+            "-c:v", "libx264", "-preset", preset, "-crf", crf,
+            "-pix_fmt", "yuv420p",
+            # Device compatibility. Without an explicit level x264 signalled 6.2 for
+            # 1080x1920@30, which no iPhone hardware decoder accepts — the file
+            # simply refuses to play and iMovie will not import it. 4.2 covers this
+            # resolution and frame rate with room to spare. The bitrate cap keeps
+            # the stream honest against the level it declares; at CRF 14 the average
+            # is ~5 Mbps, so 20M never binds. CFR because iMovie dislikes variable
+            # frame rate, which concatenated segments otherwise produce.
+            "-profile:v", "high", "-level:v", "4.2",
+            "-maxrate", "20M", "-bufsize", "40M",
+        ]
+
     cmd = [
         "ffmpeg", *FF_THREAD_FLAGS, "-y",
         *inputs,
         "-filter_complex", filter_complex,
         "-map", out_label,
         "-map", "0:a",
-        "-c:v", "libx264", "-preset", preset, "-crf", crf,
-        "-pix_fmt", "yuv420p",
-        # Device compatibility. Without an explicit level x264 signalled 6.2 for
-        # 1080x1920@30, which no iPhone hardware decoder accepts — the file
-        # simply refuses to play and iMovie will not import it. 4.2 covers this
-        # resolution and frame rate with room to spare. The bitrate cap keeps
-        # the stream honest against the level it declares; at CRF 14 the average
-        # is ~5 Mbps, so 20M never binds. CFR because iMovie dislikes variable
-        # frame rate, which concatenated segments otherwise produce.
-        "-profile:v", "high", "-level:v", "4.2",
-        "-maxrate", "20M", "-bufsize", "40M",
+        *vcodec,
         "-fps_mode", "cfr", "-r", str(fps),
         "-c:a", "copy",
         "-movflags", "+faststart",
@@ -718,6 +787,15 @@ def main() -> None:
              "Recommended for iPhone HDR selfie footage; harmless on other sources.",
     )
     ap.add_argument(
+        "--hdr-preserve",
+        action="store_true",
+        help="Keep HDR instead of tone-mapping to SDR: no tonemap, 10-bit HEVC "
+             "(main10) output carrying the source's HLG/PQ tags. Matches the "
+             "on-phone look for HDR displays / Instagram (which preserves HDR "
+             "end-to-end). Drops Dolby Vision RPU (HLG static HDR kept). Overrides "
+             "--skin-fix. For SDR deliverables use --skin-fix instead.",
+    )
+    ap.add_argument(
         "--threads",
         type=int,
         default=0,
@@ -754,11 +832,14 @@ def main() -> None:
     edit_dir = edl_path.parent
     out_path = args.output.resolve()
 
+    if args.hdr_preserve and args.skin_fix:
+        print("note: --hdr-preserve overrides --skin-fix (skin-fix is the SDR path)")
+
     # 1. Extract per-segment (auto-grade per range if EDL grade is "auto")
     segment_paths = extract_all_segments(
         edl, edit_dir, preview=args.preview, draft=args.draft, fps=args.fps,
         lossless=args.hq, audio_bitrate=("320k" if args.hq else "192k"),
-        skin_fix=args.skin_fix,
+        skin_fix=args.skin_fix, hdr_preserve=args.hdr_preserve,
     )
 
     # 2. Concat → base
@@ -790,12 +871,14 @@ def main() -> None:
     if args.no_loudnorm:
         # Composite directly to final output
         build_final_composite(base_path, overlays, subs_path, out_path, edit_dir,
-                              crf=comp_crf, preset=comp_preset, fps=args.fps)
+                              crf=comp_crf, preset=comp_preset, fps=args.fps,
+                              hdr_preserve=args.hdr_preserve)
     else:
         # Composite to a temp file, then run loudnorm → final output
         tmp_composite = out_path.with_suffix(".prenorm.mp4")
         build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir,
-                              crf=comp_crf, preset=comp_preset, fps=args.fps)
+                              crf=comp_crf, preset=comp_preset, fps=args.fps,
+                              hdr_preserve=args.hdr_preserve)
         print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
         apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft,
                                 audio_bitrate=audio_bitrate)

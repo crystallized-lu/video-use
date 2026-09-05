@@ -86,7 +86,7 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 - **`transcribe_batch.py <videos_dir>`** — 4-worker parallel hosted Scribe transcription. Use for multi-take when Scribe is needed.
 - **`pack_transcripts.py --edit-dir <dir>`** — `transcripts/*.json` → `takes_packed.md` (phrase-level, break on silence ≥ 0.5s).
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
-- **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline. `--skin-fix` for iPhone HLG footage (see below). `--low-compute` (or `--threads N`) to render gently and keep the machine responsive.
+- **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline. `--hdr-preserve` keeps HDR for the phone look (preferred for HDR displays / Instagram); `--skin-fix` corrects skin when you must deliver SDR (both for iPhone HLG footage — see below). `--low-compute` (or `--threads N`) to render gently and keep the machine responsive.
 - **`grade.py <in> -o <out>`** — ffmpeg filter chain grade. Presets + `--filter '<raw>'` for custom.
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
@@ -209,7 +209,27 @@ For anything else — portraiture, nature, product, music video, documentary —
 
 Hard rules: apply **per-segment during extraction** (not post-concat, which re-encodes twice). Never go aggressive without testing skin tones.
 
-### iPhone HLG footage — `--skin-fix`
+### iPhone HLG footage — preserve HDR (`--hdr-preserve`) vs correct SDR (`--skin-fix`)
+
+There are two ways to handle iPhone HLG footage, and the right one depends on where it ships.
+
+**`--hdr-preserve` — the preferred path when the destination is an HDR display or Instagram.**
+The "pale/red skin" problem is not a grade bug: tone-mapping HLG→SDR *cannot* match the phone,
+because a wider gamut and brightness range are being squeezed into Rec.709. Instagram/iOS don't
+tone-map — they carry the video HDR end-to-end (Meta eng, Nov 2025: Dolby Vision + `amve`
+metadata through transcode to playback), which is exactly why an uploaded clip looks like the
+phone. `--hdr-preserve` does the same locally: **no tonemap**, everything stays 10-bit, captions
+burn on the HLG stream, and the composite encodes **HEVC main10 (VideoToolbox)** carrying the
+source's HLG/PQ color tags. Verified against source on-device — skin matches, and white / cyan /
+pink house captions read cleanly on HLG (no HDR-space color authoring needed). Caveat: it keeps
+HLG **static** HDR; the source's **Dolby Vision RPU** (per-frame dynamic metadata) is dropped —
+full DoVi passthrough needs a different encoder. Note the delivery codec differs from the SDR
+path: HEVC (hvc1), not H.264 — so the H.264 level dance (Hard Rule 14) doesn't apply; the phone
+plays it on its HEVC decoder.
+
+**`--skin-fix` — the fallback for when you genuinely need an SDR (H.264) deliverable.** It cannot
+reach the HDR look, but it removes the worst of the tonemap's damage. The rest of this section
+describes it.
 
 iPhone shoots HLG HDR (`color_transfer=arib-std-b67`). Tone-mapping it to SDR has two
 side effects on skin: it **oversaturates → a red/flushed face**, and **compresses
