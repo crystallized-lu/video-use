@@ -291,7 +291,10 @@ def extract_segment(
 
     # 30ms audio fades at both edges (Rule 3) — prevent pops
     fade_out_start = max(0.0, duration - 0.03)
-    af = f"afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out_start:.3f}:d=0.03"
+    # apad+atrim: audio exactly `duration` long, matching the frame-exact video,
+    # so no per-segment shortfall accumulates across the concat.
+    af = (f"apad,atrim=0:{duration:.6f},"
+          f"afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out_start:.3f}:d=0.03")
 
     if draft:
         preset, crf = "ultrafast", "28"
@@ -305,6 +308,7 @@ def extract_segment(
         "-ss", f"{seg_start:.3f}",
         "-i", str(source),
         "-t", f"{duration:.3f}",
+        "-frames:v", str(round(duration * fps)),   # exact frame count: video == audio length
         "-vf", vf,
         "-af", af,
         # Lossless intermediate (hq): the segment encode then costs nothing and
@@ -314,8 +318,10 @@ def extract_segment(
           else ["-c:v", "libx264", "-preset", preset, "-crf", crf]),
         "-pix_fmt", "yuv420p10le" if hdr else "yuv420p", "-r", str(fps),
         *(source_color_tags(source) if hdr else []),
-        "-c:a", "aac", "-b:a", audio_bitrate, "-ar", "48000",
-        "-movflags", "+faststart",
+        # PCM, not AAC: every AAC segment carries encoder priming/padding, and the
+        # -c copy concat stacks it into a growing audio lag (measured +0.36 s over
+        # 23 segments). PCM concatenates sample-exact; audio is encoded once, later.
+        "-c:a", "pcm_s16le", "-ar", "48000",
         str(out_path),
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -332,7 +338,7 @@ def extract_all_segments(
     skin_fix: bool = False,
     hdr_preserve: bool = False,
 ) -> list[Path]:
-    """Extract every EDL range into edit_dir/clips_graded/seg_NN.mp4.
+    """Extract every EDL range into edit_dir/clips_graded/seg_NN.mov.
     Returns the ordered list of segment paths.
 
     If the EDL `grade` is "auto", analyze each segment range with
@@ -358,8 +364,10 @@ def extract_all_segments(
         src_path = resolve_path(sources[src_name], edit_dir)
         start = float(r["start"])
         end = float(r["end"])
-        duration = end - start
-        out_path = clips_dir / f"seg_{i:02d}_{src_name}.mp4"
+        # Whole frames, so the segment's video and audio are the same length;
+        # otherwise each concat joint adds up to one frame of A/V offset.
+        duration = round((end - start) * fps) / fps
+        out_path = clips_dir / f"seg_{i:02d}_{src_name}.mov"
 
         if is_auto:
             seg_filter, _stats = auto_grade_for_clip(src_path, start=start, duration=duration, verbose=False)
@@ -633,7 +641,8 @@ def build_final_composite(
 
     if not has_overlays and not has_subs:
         # Nothing to do — just rename/copy base to final name
-        run(["ffmpeg", "-y", "-i", str(base_path), "-c", "copy", str(out_path)], quiet=True)
+        run(["ffmpeg", "-y", "-i", str(base_path), "-c:v", "copy", "-c:a", "aac", "-b:a", "320k",
+             "-movflags", "+faststart", str(out_path)], quiet=True)
         return
 
     inputs: list[str] = ["-i", str(base_path)]
@@ -725,7 +734,7 @@ def build_final_composite(
         "-map", "0:a",
         *vcodec,
         "-fps_mode", "cfr", "-r", str(fps),
-        "-c:a", "copy",
+        "-c:a", "aac", "-b:a", "320k",   # base audio is PCM (see extract_segment)
         "-movflags", "+faststart",
         str(out_path),
     ]
@@ -844,11 +853,11 @@ def main() -> None:
 
     # 2. Concat → base
     if args.draft:
-        base_name = "base_draft.mp4"
+        base_name = "base_draft.mov"
     elif args.preview:
-        base_name = "base_preview.mp4"
+        base_name = "base_preview.mov"
     else:
-        base_name = "base.mp4"
+        base_name = "base.mov"
     base_path = edit_dir / base_name
     concat_segments(segment_paths, base_path, edit_dir)
 
