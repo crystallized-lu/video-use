@@ -42,8 +42,8 @@ COLOR_EMPHASIS_ACTIVE = "&HFFB6C9&"
 SWITCH_CAPTIONS_EVERY_MS = 1100
 
 # Box / outline style. Default: white text with black outline + shadow (BorderStyle 1).
-# style.json "box": true switches to libass BorderStyle 3: a square box (OutlineColour) behind
-# each line, padded by OUTLINE, with a drop shadow (BackColour) offset by SHADOW.
+# style.json "box": true switches to libass BorderStyle 4: one square box (BackColour) behind
+# each line, padded by OUTLINE (see apply_style).
 BOLD = 0
 BORDER_STYLE = 1
 OUTLINE = 3
@@ -193,11 +193,14 @@ def apply_style(style: dict) -> None:
     if "outline_width" in style:
         g["OUTLINE"] = style["outline_width"]
     if style.get("box"):
-        g["BORDER_STYLE"] = 3
+        # libass BorderStyle 4: ONE box per line in BackColour, padded by Outline. (BorderStyle 3 draws a
+        # box per override run, i.e. per word here; translucent boxes overlap at the spaces and leave
+        # visible stripes.) Glyph outlines are made fully transparent so only the box shows. No shadow.
+        g["BORDER_STYLE"] = 4
         g["OUTLINE"] = style.get("box_padding", 18)
-        g["OUTLINE_COLOUR"] = hex_to_ass(style.get("box_color", "#FFFFFF"), style.get("box_alpha", 0.86))
-        g["BACK_COLOUR"] = hex_to_ass(style.get("shadow_color", "#000000"), style.get("shadow_alpha", 0.2))
-        g["SHADOW"] = style.get("shadow_depth", 6)
+        g["OUTLINE_COLOUR"] = "&HFF000000&"
+        g["BACK_COLOUR"] = hex_to_ass(style.get("box_color", "#FFFFFF"), style.get("box_alpha", 0.86))
+        g["SHADOW"] = 0
 
 
 def build_dialogue(page: list[dict]) -> str:
