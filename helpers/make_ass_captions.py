@@ -41,6 +41,19 @@ COLOR_EMPHASIS_ACTIVE = "&HFFB6C9&"
 
 SWITCH_CAPTIONS_EVERY_MS = 1100
 
+# Box / outline style. Default: white text with black outline + shadow (BorderStyle 1).
+# style.json "box": true switches to libass BorderStyle 3: a square box (OutlineColour) behind
+# each line, padded by OUTLINE, with a drop shadow (BackColour) offset by SHADOW.
+BOLD = 0
+BORDER_STYLE = 1
+OUTLINE = 3
+SHADOW = 4
+OUTLINE_COLOUR = "&H00000000&"
+BACK_COLOUR = "&H00000000&"
+
+# --hlg: map sRGB style colours to HLG BT.2020 (SDR white -> BT.2408 203-nit reference white)
+HLG = False
+
 UPPERCASE = False
 MAX_WORDS_PER_PAGE = None
 
@@ -124,11 +137,31 @@ def escape_ass(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", r"\{").replace("}", r"\}")
 
 
-def hex_to_ass(hex_color: str) -> str:
-    """'#RRGGBB' → ASS '&HBBGGRR&'."""
+def srgb_to_hlg(rgb: tuple[int, int, int]) -> tuple[int, int, int]:
+    """sRGB 0-255 -> HLG BT.2020 R'G'B' 0-255, SDR white at 203 nits (~75% HLG). Per-channel
+    inverse-OOTF approximation; matches ffmpeg zscale npl=203 to within ~3 Y10 code values."""
+    import math
+    m = [[0.6274, 0.3293, 0.0433], [0.0691, 0.9195, 0.0114], [0.0164, 0.0880, 0.8956]]
+    a, b, c = 0.17883277, 0.28466892, 0.55991073
+    lin = [(v / 255 / 12.92) if v / 255 <= 0.04045 else ((v / 255 + 0.055) / 1.055) ** 2.4 for v in rgb]
+    out = []
+    for row in m:
+        e = max(0.0, 0.203 * sum(k * l for k, l in zip(row, lin))) ** (1 / 1.2)
+        out.append(round(255 * (math.sqrt(3 * e) if e <= 1 / 12 else a * math.log(12 * e - b) + c)))
+    return tuple(out)
+
+
+def hex_to_ass(hex_color: str, alpha: float = 1.0) -> str:
+    """'#RRGGBB' (+ opacity 0-1) → ASS '&HAABBGGRR&' (ASS alpha: 00 opaque, FF transparent)."""
     h = hex_color.lstrip("#")
-    r, g, b = h[0:2], h[2:4], h[4:6]
-    return f"&H{b}{g}{r}&".upper()
+    rgb = tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    if HLG:
+        rgb = srgb_to_hlg(rgb)
+    r, g, b = (f"{v:02X}" for v in rgb)
+    if alpha >= 1:
+        return f"&H{b}{g}{r}&".upper()   # opaque: keep the classic 6-digit form
+    aa = f"{round((1 - alpha) * 255):02X}"
+    return f"&H{aa}{b}{g}{r}&".upper()
 
 
 def apply_style(style: dict) -> None:
@@ -155,6 +188,16 @@ def apply_style(style: dict) -> None:
             g[const] = hex_to_ass(style[key])
     if "emphasis_words" in style:
         g["EMPHASIS_WORDS"] = set(style["emphasis_words"])
+    if "bold" in style:
+        g["BOLD"] = -1 if style["bold"] else 0
+    if "outline_width" in style:
+        g["OUTLINE"] = style["outline_width"]
+    if style.get("box"):
+        g["BORDER_STYLE"] = 3
+        g["OUTLINE"] = style.get("box_padding", 18)
+        g["OUTLINE_COLOUR"] = hex_to_ass(style.get("box_color", "#FFFFFF"), style.get("box_alpha", 0.86))
+        g["BACK_COLOUR"] = hex_to_ass(style.get("shadow_color", "#000000"), style.get("shadow_alpha", 0.2))
+        g["SHADOW"] = style.get("shadow_depth", 6)
 
 
 def build_dialogue(page: list[dict]) -> str:
@@ -196,7 +239,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{FONT_BASE},{FONT_SIZE},{COLOR_INACTIVE},&H00FFFFFF&,&H00000000&,&H00000000&,0,0,0,0,100,100,0,0,1,3,4,2,{MARGIN_L},{MARGIN_R},{MARGIN_V},1
+Style: Default,{FONT_BASE},{FONT_SIZE},{COLOR_INACTIVE},&H00FFFFFF&,{OUTLINE_COLOUR},{BACK_COLOUR},{BOLD},0,0,0,100,100,0,0,{BORDER_STYLE},{OUTLINE},{SHADOW},2,{MARGIN_L},{MARGIN_R},{MARGIN_V},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -245,7 +288,11 @@ def main() -> None:
     ap.add_argument("-o", "--output", type=Path, required=True)
     ap.add_argument("--style", type=Path, default=None,
                     help="Optional style.json overriding fonts/colors/word lists")
+    ap.add_argument("--hlg", action="store_true",
+                    help="Map style colours to HLG BT.2020 for burning onto HDR (render.py --hdr-preserve)")
     args = ap.parse_args()
+    global HLG
+    HLG = args.hlg
 
     edl_path = args.edl.resolve()
     if not edl_path.exists():

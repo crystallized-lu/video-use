@@ -649,6 +649,13 @@ def build_final_composite(
     for ov in overlays:
         ov_path = resolve_path(ov["file"], edit_dir)
         inputs += ["-i", str(ov_path)]
+    # Optional backdrop blur (CSS backdrop-filter): an overlay with "backdrop_mask" (gray video, white =
+    # card body, same length as the overlay) gets the base blurred underneath it, shaped by the mask.
+    blurred = [i for i, ov in enumerate(overlays, start=1) if ov.get("backdrop_mask")]
+    mask_input = {}
+    for i in blurred:
+        mask_input[i] = len(inputs) // 2
+        inputs += ["-i", str(resolve_path(overlays[i - 1]["backdrop_mask"], edit_dir))]
 
     filter_parts: list[str] = []
     # PTS-shift every overlay so its frame 0 lands at start_in_output
@@ -661,7 +668,20 @@ def build_final_composite(
     # records the result as an edit-list delay on the video track only — so the
     # audio plays ahead of the picture. Harmless-looking at 20ms, clearly
     # audible as lip-sync drift once it reaches a whole frame.
-    filter_parts.append("[0:v]setpts=PTS-STARTPTS[vbase]")
+    if blurred:
+        filter_parts.append("[0:v]setpts=PTS-STARTPTS,split=" + str(len(blurred) + 1) + "[vbase]"
+                            + "".join(f"[bsrc{i}]" for i in blurred))
+        for i in blurred:
+            ov = overlays[i - 1]
+            t, dur = float(ov["start_in_output"]), float(ov["duration"])
+            sigma = float(ov.get("backdrop_sigma", 24))
+            filter_parts.append(
+                f"[bsrc{i}]trim=start={t:.3f}:duration={dur:.3f},setpts=PTS-STARTPTS,"
+                f"gblur=sigma={sigma},format=yuva444p10le[bblur{i}]")
+            filter_parts.append(f"[{mask_input[i]}:v]format=gray,setpts=PTS-STARTPTS[bmask{i}]")
+            filter_parts.append(f"[bblur{i}][bmask{i}]alphamerge,setpts=PTS-STARTPTS+{t}/TB[bm{i}]")
+    else:
+        filter_parts.append("[0:v]setpts=PTS-STARTPTS[vbase]")
 
     # Chain overlays on top of base
     current = "[vbase]"
@@ -670,6 +690,10 @@ def build_final_composite(
         dur = float(ov["duration"])
         end = t + dur
         next_label = f"[v{idx}]"
+        if idx in blurred:   # blurred backdrop first, card on top
+            filter_parts.append(
+                f"{current}[bm{idx}]overlay=enable='between(t,{t:.3f},{end:.3f})'[vb{idx}]")
+            current = f"[vb{idx}]"
         filter_parts.append(
             f"{current}[a{idx}]overlay=enable='between(t,{t:.3f},{end:.3f})'{next_label}"
         )
